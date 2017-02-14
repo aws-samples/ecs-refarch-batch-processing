@@ -1,0 +1,509 @@
+{
+  "AWSTemplateFormatVersion" : "2010-09-09",
+  "Description" : "AWS CloudFormation template for deploying an ECS environment for handling batch workloads. The CloudFormation template creates an input and an output S3 bucket. Objects uploaded to the input S3 bucket creates an event that is put in a SQS queue. The ECS task contains a Docker container that pulls messages from the queue, reads the content and downloads the corresponding object from the S3 bucket. The Docker container then transforms the object and uploads it to the output S3 bucket. In this example template we are using images, in jpg format, to showcase the batch workload ECS architecture. Upload images with a .jpg suffix in the input S3 bucket to trigger the event.",
+
+  "Parameters" : {
+    "KeyName": {
+      "Type": "AWS::EC2::KeyPair::KeyName",
+      "Description": "Name of an existing EC2 KeyPair to enable SSH access to the ECS instances"
+    },
+    "VpcId" : {
+      "Type" : "AWS::EC2::VPC::Id",
+      "Description": "The VPC to use for the ECS cluster"
+    },
+    "Subnets" : {
+      "Type" : "List<AWS::EC2::Subnet::Id>"
+    },
+    "DesiredCapacity": {
+      "Type": "Number",
+      "Default" : "1",
+      "Description": "Number of desired instances in the AutoScaling Group and ECS Cluster"
+    },
+    "MaxSize": {
+      "Type": "Number",
+      "Default" : "1",
+      "Description": "Maximum number of instances in the AutoScaling Group and ECS Cluster"
+    },
+    "DockerImage": {
+      "Type": "String",
+      "Description": "Docker repository and image file to deploy as part of the ECS task. In the form repository/image"
+    },
+    "InstanceType" : {
+      "Description" : "The EC2 instance type",
+      "Default" : "t2.micro",
+      "Type" : "String",
+      "AllowedValues" : [ "t2.micro", "t2.small", "t2.medium", "m3.medium", "m3.large", "m3.xlarge",
+"m3.2xlarge", "c3.large", "c3.xlarge", "c3.2xlarge", "c3.4xlarge", "c3.8xlarge", "c4.large", "c4.xlarge",
+"c4.2xlarge", "c4.4xlarge", "c4.8xlarge", "r3.large", "r3.xlarge", "r3.2xlarge", "r3.4xlarge", "r3.8xlarge",
+"i2.xlarge", "i2.2xlarge", "i2.4xlarge", "i2.8xlarge", "d2.xlarge", "d2.2xlarge", "d2.4xlarge", "d2.8xlarge",
+"hi1.4xlarge", "hs1.8xlarge", "cr1.8xlarge", "cc2.8xlarge"],
+      "ConstraintDescription" : "must be a valid EC2 instance type."
+    },
+    "SSHLocation" : {
+      "Description" : " The IP address range that can be used to SSH to the EC2 instances",
+      "Type": "String",
+      "MinLength": "9",
+      "MaxLength": "18",
+      "Default": "0.0.0.0/0",
+      "AllowedPattern": "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})",
+      "ConstraintDescription": "must be a valid IP CIDR range of the form x.x.x.x/x."
+    }
+  },
+
+  "Mappings" : {
+    "AWSRegionToAMI" : {
+      "us-east-1"         : { "AMIID" : "ami-6df8fe7a" },
+      "us-east-2"         : { "AMIID" : "ami-c6b5efa3" },
+      "us-west-1"         : { "AMIID" : "ami-1eda8d7e" },
+      "us-west-2"         : { "AMIID" : "ami-a2ca61c2" },
+      "eu-west-1"         : { "AMIID" : "ami-ba346ec9" },
+      "eu-west-2"         : { "AMIID" : "ami-42c5cf26" },
+      "eu-central-1"      : { "AMIID" : "ami-e012d48f" },
+      "ap-northeast-1"    : { "AMIID" : "ami-08f7956f" },
+      "ap-southeast-1"    : { "AMIID" : "ami-f4832f97" },
+      "ap-southeast-2"    : { "AMIID" : "ami-774b7314" },
+      "ca-central-1"      : { "AMIID" : "ami-be45f7da" }
+    }
+  },
+
+  "Resources" : {
+    "SQSBatchQueue" : {
+      "Type" : "AWS::SQS::Queue",
+      "Properties" : {
+         "QueueName" : "SQSBatchQueue",
+         "RedrivePolicy" : { "deadLetterTargetArn" : { "Fn::GetAtt" : ["SQSDeadLetterQueue", "Arn"] }, "maxReceiveCount" : "5" }
+      }
+    },
+
+    "SQSBatchQueuePolicy" : {
+      "Type" : "AWS::SQS::QueuePolicy",
+      "Properties" : {
+        "PolicyDocument" : {
+          "Version": "2012-10-17",
+          "Id": "MySQSBatchQueuePolicy",
+          "Statement": [
+            {
+              "Sid": "Allow-send-message-from-S3",
+              "Effect": "Allow",
+              "Principal": "*",
+              "Action": "SQS:SendMessage",
+              "Resource": { "Fn::GetAtt" : ["SQSBatchQueue", "Arn"] },
+              "Condition": {
+                "ArnLike": {
+                  "aws:SourceArn": { "Fn::Join" : ["", ["arn:aws:s3:::", { "Ref" : "myS3InputBucket" } ]]}
+                }
+              }
+            }
+          ]
+        },
+        "Queues" : [ { "Ref" : "SQSBatchQueue" } ]
+      }
+    },
+
+    "SQSDeadLetterQueue" : {
+      "Type" : "AWS::SQS::Queue",
+      "Properties" : {
+         "QueueName" : "SQSDeadLetterQueue"
+      }
+    },
+
+    "SQSCloudWatchAlarm" : {
+      "Type" : "AWS::CloudWatch::Alarm",
+      "Properties" : {
+         "AlarmDescription" : "Scale ECS Service based on SQS queue depth",
+         "AlarmName" : "SQSQueueDepth",
+         "ComparisonOperator" : "GreaterThanOrEqualToThreshold",
+         "Dimensions" : [ { "Name": "QueueName", "Value": "SQSBatchQueue"} ],
+         "EvaluationPeriods" : "1",
+         "MetricName" : "ApproximateNumberOfMessagesVisible",
+         "Namespace" : "AWS/SQS",
+         "Period" : "60",
+         "Statistic" : "Average",
+         "Threshold" : "5",
+         "Unit" : "Count"
+      }
+    },
+
+    "myS3InputBucket" : {
+      "Type" : "AWS::S3::Bucket"
+    },
+
+    "myS3OutputBucket" : {
+      "Type" : "AWS::S3::Bucket"
+    },
+
+    "ECSCluster": {
+      "Type": "AWS::ECS::Cluster"
+    },
+
+    "TaskDefinition": {
+      "Type": "AWS::ECS::TaskDefinition",
+      "Properties" : {
+        "TaskRoleArn" : { "Ref" : "ECSTaskRole" },
+        "ContainerDefinitions" : [ {
+          "Name": "worker",
+          "Cpu": "10",
+          "Essential": "true",
+          "Image": { "Ref" : "DockerImage" },
+          "Memory":"300",
+          "Environment": [
+            {
+            "Name": "s3OutputBucket",
+            "Value": { "Ref" : "myS3OutputBucket" }
+            },
+            {
+            "Name": "s3InputBucket",
+            "Value": { "Ref" : "myS3InputBucket" }
+            },
+            {
+            "Name": "AWSRegion",
+            "Value": { "Ref" : "AWS::Region" }
+            },
+            {
+            "Name": "SQSBatchQueue",
+            "Value": "SQSBatchQueue"
+            }
+          ]
+        }]
+      }
+    },
+
+    "ECSAutoScalingGroup" : {
+      "Type" : "AWS::AutoScaling::AutoScalingGroup",
+      "Properties" : {
+        "VPCZoneIdentifier" : { "Ref" : "Subnets" },
+        "LaunchConfigurationName" : { "Ref" : "ContainerInstances" },
+        "MinSize" : "1",
+        "MaxSize" : { "Ref" : "MaxSize" },
+        "DesiredCapacity" : { "Ref" : "DesiredCapacity" }
+      },
+      "CreationPolicy" : {
+        "ResourceSignal" : {
+          "Timeout" : "PT15M"
+        }
+      },
+      "UpdatePolicy": {
+        "AutoScalingRollingUpdate": {
+          "MinInstancesInService": "1",
+          "MaxBatchSize": "1",
+          "PauseTime" : "PT15M",
+          "WaitOnResourceSignals": "true"
+        }
+      }
+    },
+
+    "ContainerInstances": {
+      "Type": "AWS::AutoScaling::LaunchConfiguration",
+      "Metadata" : {
+        "AWS::CloudFormation::Init" : {
+          "config" : {
+
+            "commands" : {
+              "01_add_instance_to_cluster" : {
+                "command" : { "Fn::Join": [ "", [ "#!/bin/bash\n", "echo ECS_CLUSTER=", { "Ref": "ECSCluster" }, " >> /etc/ecs/ecs.config" ] ] }
+              }
+            },
+
+            "files" : {
+              "/etc/cfn/cfn-hup.conf" : {
+                "content" : { "Fn::Join" : ["", [
+                  "[main]\n",
+                  "stack=", { "Ref" : "AWS::StackId" }, "\n",
+                  "region=", { "Ref" : "AWS::Region" }, "\n"
+                ]]},
+                "mode"    : "000400",
+                "owner"   : "root",
+                "group"   : "root"
+              },
+              "/etc/cfn/hooks.d/cfn-auto-reloader.conf" : {
+                "content": { "Fn::Join" : ["", [
+                  "[cfn-auto-reloader-hook]\n",
+                  "triggers=post.update\n",
+                  "path=Resources.ContainerInstances.Metadata.AWS::CloudFormation::Init\n",
+                  "action=/opt/aws/bin/cfn-init -v ",
+                  "         --stack ", { "Ref" : "AWS::StackName" },
+                  "         --resource ContainerInstances ",
+                  "         --region ", { "Ref" : "AWS::Region" }, "\n",
+                  "runas=root\n"
+                ]]}
+              }
+            },
+
+            "services" : {
+              "sysvinit" : {
+                "cfn-hup" : { "enabled" : "true", "ensureRunning" : "true", "files" : ["/etc/cfn/cfn-hup.conf", "/etc/cfn/hooks.d/cfn-auto-reloader.conf"] }
+              }
+            }
+          }
+        }
+      },
+      "Properties": {
+        "ImageId" : { "Fn::FindInMap" : [ "AWSRegionToAMI", { "Ref" : "AWS::Region" }, "AMIID" ] },
+        "InstanceType"   : { "Ref" : "InstanceType" },
+        "SecurityGroups" : [ { "Ref" : "InstanceSecurityGroup" } ],
+        "IamInstanceProfile": { "Ref": "EC2InstanceProfile" },
+        "KeyName"        : { "Ref" : "KeyName" },
+        "UserData"       : { "Fn::Base64" : { "Fn::Join" : ["", [
+             "#!/bin/bash -xe\n",
+             "yum install -y aws-cfn-bootstrap\n",
+
+             "/opt/aws/bin/cfn-init -v ",
+             "         --stack ", { "Ref" : "AWS::StackName" },
+             "         --resource ContainerInstances ",
+             "         --region ", { "Ref" : "AWS::Region" }, "\n",
+
+             "/opt/aws/bin/cfn-signal -e $? ",
+             "         --stack ", { "Ref" : "AWS::StackName" },
+             "         --resource ECSAutoScalingGroup ",
+             "         --region ", { "Ref" : "AWS::Region" }, "\n"
+        ]]}}
+      }
+    },
+
+    "InstanceSecurityGroup" : {
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "GroupDescription" : "Enable SSH access via port 22",
+        "VpcId" : { "Ref" : "VpcId" },
+        "SecurityGroupIngress" : [ {
+          "IpProtocol" : "tcp",
+          "FromPort" : "22",
+          "ToPort" : "22",
+          "CidrIp" : { "Ref" : "SSHLocation"}
+        } ]
+      }
+    },
+
+    "ECSServiceRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "ecs.amazonaws.com"
+                ]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Path": "/",
+        "Policies": [
+          {
+            "PolicyName": "ecs-service",
+            "PolicyDocument": {
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:AuthorizeSecurityGroupIngress",
+                    "ec2:Describe*",
+                    "elasticloadbalancing:DeregisterInstancesFromLoadBalancer",
+                    "elasticloadbalancing:DeregisterTargets",
+                    "elasticloadbalancing:Describe*",
+                    "elasticloadbalancing:RegisterInstancesWithLoadBalancer",
+                    "elasticloadbalancing:RegisterTargets"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+
+    "AmazonEC2ContainerServiceAutoscaleRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+              "Service": "application-autoscaling.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Path" : "/",
+        "Policies" : [
+          {
+            "PolicyName" : "ecsautoscaling",
+            "PolicyDocument" : {
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                      "ecs:DescribeServices",
+                      "ecs:UpdateService"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                      "cloudwatch:DescribeAlarms"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+
+    "EC2Role": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "ec2.amazonaws.com"
+                ]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Path": "/",
+        "Policies": [
+          {
+            "PolicyName": "ecs-instance",
+            "PolicyDocument": {
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecs:CreateCluster",
+                    "ecs:DeregisterContainerInstance",
+                    "ecs:DiscoverPollEndpoint",
+                    "ecs:Poll",
+                    "ecs:RegisterContainerInstance",
+                    "ecs:StartTelemetrySession",
+                    "ecs:Submit*",
+                    "ecr:GetAuthorizationToken",
+                    "ecr:BatchCheckLayerAvailability",
+                    "ecr:GetDownloadUrlForLayer",
+                    "ecr:BatchGetImage",
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "ECSTaskRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "ecs-tasks.amazonaws.com"
+                ]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Path": "/",
+        "Policies": [
+          {
+            "PolicyName": "ecs-task",
+            "PolicyDocument": {
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:ListQueues",
+                    "sqs:GetQueueUrl"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:DeleteMessage",
+                    "sqs:ReceiveMessage",
+                    "sqs:ChangeMessageVisibility"
+                  ],
+                  "Resource": { "Fn::GetAtt" : ["SQSBatchQueue", "Arn"] }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:PutObject"
+                  ],
+                  "Resource":  { "Fn::Join" : ["", ["arn:aws:s3:::", { "Ref" : "myS3OutputBucket" } , "/*" ]]}
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+
+    "EC2InstanceProfile": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties": {
+        "Path": "/",
+        "Roles": [
+          {
+            "Ref": "EC2Role"
+          }
+        ]
+      }
+    }
+  },
+
+  "Outputs" : {
+    "Cluster" : {
+      "Description": "The name of the ECS cluster",
+      "Value" : { "Ref" : "ECSCluster" }
+    },
+    "Task" : {
+      "Description": "The name of the ECS Task Definition",
+      "Value" : { "Ref" : "TaskDefinition" }
+    },
+    "SQSBatchQueue" : {
+      "Description": "The SQS queue that is used to hold messages containing the name of the uploaded objects",
+      "Value" : { "Ref" : "SQSBatchQueue" }
+    },
+    "InputBucket" : {
+      "Description": "The S3 bucket where images can be uploaded to",
+      "Value" : { "Ref" : "myS3InputBucket" }
+    },
+    "OutputBucket" : {
+      "Description": "The S3 bucket holding the resized images and thumbnails",
+      "Value" : { "Ref" : "myS3OutputBucket" }
+    }
+  }
+}
