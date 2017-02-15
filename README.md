@@ -42,18 +42,20 @@ Choose **Launch Stack** to launch the template in the us-east-1 region in your a
 The CloudFormation template requires the following parameters:
 
 - **DesiredCapacity** : The number of desired instances in the AutoScaling Group and ECS Cluster
-- **DockerImage** : The Docker repository and image file to deploy as part of the ECS task. In the form <repository/image>
+- **DockerImage** : The Docker repository and image file to deploy as part of the ECS task. Choose the docker image that you created in Step 1, in the form repo/image
 - **InstanceType** : The EC2 instance type
 - **KeyName** : The name of an existing EC2 key pair to enable SSH access to the ECS instances
 - **MaxSize** : The maximum number of instances in the AutoScaling Group and ECS Cluster
-- **VpcId** : The VPC to use for the ECS cluster
+- **SSHLocation** : The IP address range that can be used to SSH into the EC2 instances
 - **Subnets** : The subnets used for the Auto Scaling group
+- **VpcId** : The VPC to use for the ECS cluster
+
 
 
 ###Step 3: Create the S3 event trigger for the SQS queue
-Select the S3 Input Bucket that the CloudFormation template created and go to Properties -> Events.
+Go to the S3 Console in your AWS Account and select the S3 Input Bucket that the CloudFormation template created and go to Properties -> Events.
 
-Configure an event notification to the SQS queue for the ObjectCreated (All) event.
+Configure an event notification to the SQS queue called SQSBatchQueue for the ObjectCreated (All) event and in the Suffix field enter "jpg".
 
 You can learn more about configuring S3 event notifications [here](http://docs.aws.amazon.com/AmazonS3/latest/dev/NotificationHowTo.html).
 
@@ -89,6 +91,7 @@ To remove all resources created by this example, do the following:
 1. Delete the created output and input S3 buckets.
 2. Delete the CloudFormation stack.
 3. Delete the ECS cluster.
+4. Delete the EC2 Role.
 
 ## CloudFormation template resources
 The following sections explain all of the resources created by the CloudFormation template provided with this example.
@@ -109,7 +112,7 @@ The following sections explain all of the resources created by the CloudFormatio
 
 - **InstanceSecurityGroup** - Security Group to which your instances are added.
 
-- **TaskDefinition** - An ECS task definition that gets scheduled by the Lambda function. The ECS task schedules a Docker container that copies the uploaded object and creates a thumbnail and a resized (1024x768) image file in the output S3 bucket.
+- **TaskDefinition** - An ECS task definition that is started by the ECS service. The ECS task schedules a Docker container that copies the uploaded object and creates a thumbnail and a resized (1024x768) image file in the output S3 bucket.
 
 - **ECSServiceRole** -  An IAM role assumed by the ECS service, which gives the service the right to register instances to an Elastic Load Balancer if needed.
 
