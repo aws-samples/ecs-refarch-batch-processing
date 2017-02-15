@@ -70,7 +70,7 @@ In this step you will [configure auto scaling](http://docs.aws.amazon.com/Amazon
 
 Select the service created in Step 4 and click Update, then "Configure Service Auto Scaling". Choose "Configure Service Auto Scaling to adjust your service’s desired count" and fill in the minimum, desired and maximum number of tasks. Click on "Add a scaling policy" and use the existing alarm (created by the CloudFormation template).
 
-The CloudWatch alarm created by the template should look similar to this.
+The CloudWatch alarm created by the template should now look similar to this.
 
 ![](images/cwalarmforsqsqueue.png)
 
