@@ -1,6 +1,6 @@
 # Amazon ECS Reference Architecture: Batch Processing
 
-This reference architecture shows how to handle Batch Processing using [Amazon ECS](http://aws.amazon.com/ecs). The Batch Processing reference architecture diagram below illustrates the architecture.
+This reference architecture shows how to handle Batch Processing using [Amazon ECS](http://aws.amazon.com/ecs). You may also want to consider [AWS Batch](https://aws.amazon.com/batch), a service that dynamically provisions the optimal quantity and type of compute resources based on the volume and specific resource requirements of the batch jobs submitted. The Batch Processing reference architecture diagram below illustrates the architecture.
 
 ![](images/ECSBatchRefArch.png)
 
